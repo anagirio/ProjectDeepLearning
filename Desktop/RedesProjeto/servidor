@@ -1,0 +1,98 @@
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+#define PORT 5005
+#define BUFFER_SIZE 1024
+
+uint32_t calcularChecksum(const char* dados, size_t tamanho) {
+    uint32_t soma = 0;
+    for (size_t i = 0; i < tamanho; i++) {
+        soma += (unsigned char)dados[i];
+    }
+    return soma;
+}
+
+int main () {
+ int socketCreate;
+ struct sockaddr_in enderecoServidor, enderecoCliente;
+ socklen_t tamanhoEnderecoCliente = sizeof(enderecoCliente);
+ char buffer[BUFFER_SIZE];
+
+ //criar socket
+     int socketCreate = socket(AF_INET, SOCK_DGRAM, 0);
+     if (socketCreate < 0) {
+         perror("Erro ao criar socket");
+         return 1;
+     }
+//configuracao do servidor
+    memset(&enderecoServidor, 0, sizeof(enderecoServidor));
+    enderecoServidor.sin_family = AF_INET;
+    enderecoServidor.sin_addr.s_addr = INADDR_ANY;
+    enderecoServidor.sin_port = htons(PORT);
+
+// criar Bind
+    if (bind(socketCreate, (struct sockaddr*)&enderecoServidor, sizeof(enderecoServidor)) < 0) {
+    perror("Erro no bind");
+    close(socketCreate);
+    return 1;
+    }
+
+    std::cout << "Servidor UDP aguardando requisição na porta " << PORT << "...\n";
+
+    while (true) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int recebido = recvfrom(socketCreate, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&enderecoCliente, &tamanhoEnderecoCliente);
+        if (recebido < 0) {
+            perror("Erro ao receber");
+            continue;
+        }
+
+        std::cout << "Requisição recebida: " << buffer << std::endl;
+    }
+
+// Espera: "REQ|nome_do_arquivo"
+
+    if (strncmp(buffer, "REQ|", 4) == 0) {
+        std::string nomeArquivo = std::string(buffer + 4);
+
+        std::ifstream arquivo(nomeArquivo, std::ios::binary);
+        if (!arquivo.is_open()) {
+            std::string erro = "ERR|Arquivo nao encontrado";
+            sendto(socketCreate, erro.c_str(), erro.size(), 0, (struct sockaddr*)&enderecoCliente, tamanhoEnderecoCliente);
+            continue;
+        }
+
+        int seq_num = 0;
+        while (!arquivo.eof()) {
+            char dados[BUFFER_SIZE - 100] = {0}; // espaço para cabeçalho
+            arquivo.read(dados, sizeof(dados));
+            std::streamsize lidos = arquivo.gcount();
+
+            uint32_t checksum = calcularChecksum(dados, lidos);
+
+            char pacote[BUFFER_SIZE] = {0};
+            snprintf(pacote, sizeof(pacote), "DATA|%d|%u|", seq_num, checksum);
+            memcpy(pacote + strlen(pacote), dados, lidos);
+
+            sendto(socketCreate, pacote, strlen(pacote) + lidos, 0, (struct sockaddr*)&enderecoCliente, tamanhoEnderecoCliente);
+            seq_num++;
+            usleep(1000); // pequena pausa
+        }
+
+    // Enviar "END"
+
+     std::string fim = "END";
+     sendto(socketCreate, fim.c_str(), fim.size(), 0, (struct sockaddr*)&enderecoCliente, tamanhoEnderecoCliente);
+
+     std::cout << "Arquivo enviado com sucesso!\n";
+
+     close(socketCreate);
+     return 0;
+    }
+}

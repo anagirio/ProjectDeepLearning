@@ -1,0 +1,104 @@
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/socket.h>
+
+#define SERVER_IP "127.0.0.1"
+#define PORT 5005
+#define BUFFER_SIZE 1024
+#define TIMEOUT 1  // segundos
+
+// Função para calcular checksum simples (soma dos bytes)
+uint32_t calcularChecksum(const char* dados, size_t tamanho) {
+    uint32_t soma = 0;
+    for (size_t i = 0; i < tamanho; i++) {
+        soma += (unsigned char)dados[i];
+    }
+    return soma;
+}
+
+// funcao para pedir a retransmissao de um arquivo
+void pedirRetransmissao(int socketCliente, struct sockaddr_in& servidor, int numSeq){
+    std::string mensagem = "RESEND|" + std::to_string(numSeq);
+    sendto(socketCliente, mensagem.c_str(), mensagem.size(), 0, (struct sockaddr*)&servidor, sizeof(servidor));
+    std::cout << "Solicitada retransmissão do segmento " << numSeq << std::endl;
+}
+
+int main() {
+    int clienteSocket;
+    struct sockaddr_in enderecoServidor;
+    char buffer[BUFFER_SIZE];
+
+    std::string ipServidor;
+    int portaServidor;
+    std::string nomeArquivo;
+
+    std::cout << "Digite o IP do servidor: ";
+    std::cin >> ipServidor;
+    std::cout << "Digite a porta do servidor: ";
+    std::cin >> portaServidor;
+    std::cout << "Digite o nome do arquivo a ser solicitado: ";
+    std::cin >> nomeArquivo;
+
+    clienteSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (clienteSocket < 0) {
+        perror("Erro ao criar o socket");
+        return 1;
+    }
+    memset(&enderecoServidor, 0, sizeof(enderecoServidor));
+    enderecoServidor.sin_family = AF_INET;
+    enderecoServidor.sin_port = htons(portaServidor);
+    inet_pton(AF_INET, ipServidor.c_str(), &enderecoServidor.sin_addr);
+
+    // Enviar requisição
+    std::string requisicao = "REQ|" + nomeArquivo;
+    sendto(clienteSocket, requisicao.c_str(), requisicao.size(), 0, (struct sockaddr*)&enderecoServidor, sizeof(enderecoServidor));
+
+    std::ofstream arquivoSaida("recebido_" + nomeArquivo, std::ios::binary);
+
+    while (true) {
+        socklen_t tamanhoEnderecoServidor = sizeof(enderecoServidor);
+        memset(buffer, 0, BUFFER_SIZE);
+        int recebido = recvfrom(clienteSocket, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&enderecoServidor, &tamanhoEnderecoServidor);
+
+        if (recebido < 0) {
+            perror("Erro ao receber dados");
+            continue;
+        }
+
+        buffer[recebido] = '\0';
+
+        if (strncmp(buffer, "ERR|", 4) == 0) {
+            std::cout << "Erro do servidor: " << buffer + 4 << std::endl;
+            break;
+        } else if (strncmp(buffer, "DATA|", 5) == 0) {
+            int seq_num;
+            uint32_t checksum_recebido;
+            char* dadosInicio = strchr(buffer, '|') + 1;
+            seq_num = atoi(dadosInicio);
+            dadosInicio = strchr(dadosInicio, '|') + 1;
+            checksum_recebido = atoi(dadosInicio);
+            dadosInicio = strchr(dadosInicio, '|') + 1;
+
+            int dadosLength = recebido - (dadosInicio - buffer);
+
+            uint32_t checksum_calculado = calcularChecksum(dadosInicio, dadosLength);
+
+            if (checksum_calculado == checksum_recebido) {
+                arquivoSaida.write(dadosInicio, dadosLength);
+                std::cout << "Recebido segmento " << seq_num << " OK\n";
+            } else {
+                std::cout << "Checksum incorreto no segmento " << seq_num << "\n";
+                pedirRetransmissao(clienteSocket, enderecoServidor, seq_num);
+            }
+        } else if (strncmp(buffer, "END", 3) == 0) {
+            std::cout << "Arquivo recebido com sucesso!\n";
+            break;
+        }
+    }
+
+    close(clienteSocket);
+    return 0;
+}
